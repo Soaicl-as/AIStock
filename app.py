@@ -1,5 +1,4 @@
 import os
-import tempfile
 import streamlit as st
 import cv2
 import numpy as np
@@ -10,64 +9,22 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Lazy imports to reduce startup time
+# Simple caching for models
 @st.cache_resource
-def load_dependencies():
-    """Load heavy dependencies only when needed"""
+def load_yolo_model():
+    """Load YOLO model with simple fallback"""
     try:
         from ultralytics import YOLO
-        from fpdf import FPDF
-        logger.info("Heavy dependencies loaded successfully")
-        return YOLO, FPDF
+        model = YOLO('yolov8n.pt')  # Smallest model
+        logger.info("YOLOv8n model loaded successfully")
+        return model
     except Exception as e:
-        logger.error(f"Error loading dependencies: {e}")
-        st.error(f"Error loading ML dependencies: {e}")
-        return None, None
+        logger.error(f"Error loading YOLO: {e}")
+        return None
 
-# HuggingFace integration (optional)
-def setup_huggingface():
-    """Setup HuggingFace integration if token is available"""
-    try:
-        from huggingface_hub import HfApi, hf_hub_download, login
-        hf_token = os.getenv("HF_TOKEN")
-        if hf_token:
-            login(hf_token)
-            return True, os.getenv("HF_REPO", "foduucom/stockmarket-pattern-detection-yolov8")
-        return False, None
-    except Exception as e:
-        logger.warning(f"HuggingFace setup failed: {e}")
-        return False, None
-
-# Load pre-trained models with better error handling
-@st.cache_resource
-def load_models():
-    """Load YOLO model with fallbacks"""
-    YOLO, _ = load_dependencies()
-    if YOLO is None:
-        return None, {}
-    
-    try:
-        # Try HuggingFace first
-        hf_available, hf_repo = setup_huggingface()
-        if hf_available and hf_repo:
-            try:
-                from huggingface_hub import hf_hub_download
-                model_path = hf_hub_download(repo_id=hf_repo, filename="best.pt")
-                model = YOLO(model_path)
-                logger.info(f"Loaded model from HuggingFace: {hf_repo}")
-            except Exception as e:
-                logger.warning(f"HF model loading failed: {e}, using default")
-                model = YOLO('yolov8n.pt')  # Smallest model
-        else:
-            model = YOLO('yolov8n.pt')  # Default to nano model for free tier
-            logger.info("Loaded default YOLOv8n model")
-    except Exception as e:
-        logger.error(f"Model loading failed: {e}")
-        st.error("Failed to load YOLO model")
-        return None, {}
-    
-    # Pattern mapping
-    pattern_map = {
+def get_pattern_map():
+    """Get pattern mapping"""
+    return {
         0: "Head and Shoulders",
         1: "Double Top", 
         2: "Double Bottom",
@@ -77,199 +34,148 @@ def load_models():
         6: "Wedge",
         7: "Channel"
     }
-    return model, pattern_map
 
-# Optimized analysis function
-def analyze_chart(image, model, pattern_map, strategy="conservative"):
-    """Analyze chart with memory optimization"""
+def analyze_chart_simple(image, model, pattern_map, confidence_threshold=0.5):
+    """Simple chart analysis"""
     if model is None:
-        return [], image
+        return [], np.array(image)
     
     try:
-        # Convert PIL to numpy if needed
+        # Resize if too large
         if isinstance(image, Image.Image):
-            # Resize large images to save memory
-            max_size = 640
-            if image.width > max_size or image.height > max_size:
-                image.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
-            image_array = np.array(image)
+            if image.width > 640 or image.height > 640:
+                image.thumbnail((640, 640), Image.Resampling.LANCZOS)
+            img_array = np.array(image)
         else:
-            image_array = image
+            img_array = image
         
-        # Run inference
-        results = model(image_array, verbose=False)  # Suppress verbose output
+        # Run detection
+        results = model(img_array, verbose=False)
         
         predictions = []
-        annotated_image = image_array.copy()
+        annotated = img_array.copy()
         
         if len(results[0].boxes) > 0:
-            confidence_threshold = 0.3 if strategy == "aggressive" else 0.5
-            
             for box in results[0].boxes:
                 try:
-                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
-                    confidence = float(box.conf[0].cpu().numpy())
-                    class_id = int(box.cls[0].cpu().numpy())
+                    coords = box.xyxy[0].cpu().numpy().astype(int)
+                    conf = float(box.conf[0].cpu().numpy())
+                    cls_id = int(box.cls[0].cpu().numpy())
                     
-                    if confidence > confidence_threshold:
-                        pattern_name = pattern_map.get(class_id, "Unknown Pattern")
+                    if conf > confidence_threshold:
+                        x1, y1, x2, y2 = coords
+                        pattern_name = pattern_map.get(cls_id, "Unknown")
+                        
                         predictions.append({
                             "pattern": pattern_name,
-                            "confidence": confidence,
-                            "bbox": (int(x1), int(y1), int(x2), int(y2))
+                            "confidence": conf,
+                            "bbox": (x1, y1, x2, y2)
                         })
                         
-                        # Draw annotations
-                        cv2.rectangle(annotated_image, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                        cv2.putText(annotated_image, f"{pattern_name}: {confidence:.2f}", 
-                                   (x1, max(y1-10, 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-                except Exception as e:
-                    logger.warning(f"Error processing detection: {e}")
+                        # Draw box
+                        cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                        cv2.putText(annotated, f"{pattern_name}: {conf:.2f}", 
+                                   (x1, max(y1-10, 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+                except:
                     continue
         
-        return predictions, annotated_image
+        return predictions, annotated
         
     except Exception as e:
         logger.error(f"Analysis error: {e}")
-        st.error(f"Analysis failed: {e}")
-        return [], image
+        return [], np.array(image)
 
-# Simple PDF generation
-def generate_pdf_report(predictions):
-    """Generate simple text report instead of PDF for memory efficiency"""
-    report = "Stock Chart Analysis Report\n"
-    report += "=" * 30 + "\n\n"
-    
-    if predictions:
-        report += "Detected Patterns:\n\n"
-        for i, pred in enumerate(predictions, 1):
-            report += f"{i}. {pred['pattern']}\n"
-            report += f"   Confidence: {pred['confidence']:.2f}\n"
-            report += f"   Location: {pred['bbox']}\n\n"
-    else:
-        report += "No patterns detected\n"
-    
-    return report
-
-# Main application
 def main():
-    # Streamlit configuration
+    # Page config
     st.set_page_config(
-        page_title="AI Stock Chart Analyzer",
+        page_title="Stock Chart Analyzer",
         page_icon="📈",
-        layout="wide"
+        layout="centered"
     )
     
-    st.title("🤖 AI Stock Chart Analysis Tool")
-    st.markdown("Upload a stock chart to detect technical patterns using YOLOv8")
-    st.markdown("---")
+    # Title
+    st.title("📈 Stock Chart Analyzer")
+    st.write("Upload a stock chart to detect technical patterns")
     
-    # Health check endpoint for Render
-    if st.sidebar.button("🔍 Health Check"):
-        st.sidebar.success("Application is running!")
-        logger.info("Health check requested")
+    # Load model
+    with st.spinner("Loading model..."):
+        model = load_yolo_model()
+        pattern_map = get_pattern_map()
     
-    # Load models with UI feedback
-    model_status = st.empty()
-    model_status.info("🔄 Loading AI models... Please wait.")
-    
-    try:
-        model, pattern_map = load_models()
-        
-        if model is None:
-            model_status.error("⚠️ Could not load the AI model. Please try again later.")
-            st.info("This might be due to memory constraints on the free tier.")
-            st.stop()
-        else:
-            model_status.success("✅ AI models loaded successfully!")
-            
-    except Exception as e:
-        model_status.error(f"❌ Error loading models: {e}")
+    if model is None:
+        st.error("Failed to load model")
         st.stop()
     
+    st.success("Model loaded successfully!")
+    
     # Settings
-    st.sidebar.header("Settings")
-    strategy = st.sidebar.selectbox(
-        "Analysis Strategy",
-        ["conservative", "aggressive"],
-        help="Conservative: Higher confidence, Aggressive: Lower confidence"
+    st.subheader("Settings")
+    strategy = st.selectbox(
+        "Detection Strategy", 
+        ["Conservative (0.5)", "Aggressive (0.3)"],
+        help="Higher threshold = fewer but more confident detections"
+    )
+    threshold = 0.5 if "Conservative" in strategy else 0.3
+    
+    # File upload
+    st.subheader("Upload Chart")
+    uploaded_file = st.file_uploader(
+        "Choose image", 
+        type=["png", "jpg", "jpeg"],
+        help="Max 5MB"
     )
     
-    # Force UI elements to show
-    st.markdown("### 📊 Upload Your Chart")
-    st.write("Choose a stock chart image to analyze for technical patterns.")
-    
-    # Create two columns for layout
-    col1, col2 = st.columns([1, 1])
-    
-    with col1:
-        uploaded_file = st.file_uploader(
-            "Choose an image file",
-            type=["png", "jpg", "jpeg"],
-            help="Upload a stock chart screenshot (max 5MB)"
-        )
+    if uploaded_file is not None:
+        # File size check
+        if uploaded_file.size > 5 * 1024 * 1024:
+            st.error("File too large (max 5MB)")
+            st.stop()
         
-        if uploaded_file is not None:
-            # Check file size
-            if uploaded_file.size > 5 * 1024 * 1024:  # 5MB limit
-                st.error("File too large. Please upload an image smaller than 5MB.")
-            else:
-                try:
-                    image = Image.open(uploaded_file)
-                    st.image(image, caption="Uploaded Chart", use_column_width=True)
+        try:
+            # Load and display image
+            image = Image.open(uploaded_file)
+            st.image(image, caption="Uploaded Chart", width=400)
+            
+            # Analyze button
+            if st.button("🔍 Analyze Chart", type="primary"):
+                with st.spinner("Analyzing..."):
+                    predictions, annotated = analyze_chart_simple(image, model, pattern_map, threshold)
+                
+                # Results
+                st.subheader("Results")
+                
+                if predictions:
+                    st.success(f"Found {len(predictions)} patterns:")
                     
-                    if st.button("🔍 Analyze Chart", type="primary", use_container_width=True):
-                        with st.spinner("Analyzing patterns..."):
-                            predictions, annotated_image = analyze_chart(image, model, pattern_map, strategy)
-                        
-                        # Store in session state
-                        st.session_state.predictions = predictions
-                        st.session_state.annotated_image = annotated_image
-                        st.session_state.original_image = image
-                        st.rerun()  # Force refresh to show results
-                        
-                except Exception as e:
-                    st.error(f"Error loading image: {e}")
-        else:
-            st.info("👆 Please upload a chart image to get started")
-    with col2:
-        st.markdown("### 📈 Analysis Results")
-        
-        if hasattr(st.session_state, 'predictions') and st.session_state.predictions:
-            st.success(f"✅ Found {len(st.session_state.predictions)} pattern(s)")
-            
-            # Show results
-            for i, pred in enumerate(st.session_state.predictions, 1):
-                with st.expander(f"Pattern {i}: {pred['pattern']}", expanded=True):
-                    st.metric("Confidence", f"{pred['confidence']:.1%}")
-                    st.write(f"**Location:** {pred['bbox']}")
-            
-            # Show annotated image
-            if hasattr(st.session_state, 'annotated_image'):
-                st.image(st.session_state.annotated_image, caption="Detected Patterns", use_column_width=True)
-            
-            # Text report download
-            if st.button("📄 Generate Report", use_container_width=True):
-                report = generate_pdf_report(st.session_state.predictions)
-                st.download_button(
-                    label="⬇️ Download Text Report",
-                    data=report,
-                    file_name="chart_analysis_report.txt",
-                    mime="text/plain",
-                    use_container_width=True
-                )
-        elif hasattr(st.session_state, 'predictions') and len(st.session_state.predictions) == 0:
-            st.info("ℹ️ No patterns detected. Try adjusting the strategy or uploading a different chart.")
-        else:
-            st.info("📤 Upload and analyze a chart to see results here")
+                    # Show predictions
+                    for i, pred in enumerate(predictions, 1):
+                        st.write(f"**{i}. {pred['pattern']}** - Confidence: {pred['confidence']:.1%}")
+                    
+                    # Show annotated image
+                    st.image(annotated, caption="Detected Patterns", width=400)
+                    
+                    # Simple text report
+                    report_text = "Stock Chart Analysis Report\n\n"
+                    for i, pred in enumerate(predictions, 1):
+                        report_text += f"{i}. {pred['pattern']} ({pred['confidence']:.1%})\n"
+                    
+                    st.download_button(
+                        "📄 Download Report",
+                        data=report_text,
+                        file_name="analysis_report.txt",
+                        mime="text/plain"
+                    )
+                else:
+                    st.info("No patterns detected. Try a different image or lower threshold.")
+                    
+        except Exception as e:
+            st.error(f"Error: {e}")
+    else:
+        st.info("Upload a chart image to get started")
     
     # Footer
     st.markdown("---")
-    st.markdown("💡 **Tip:** Use clear, high-contrast chart images for best results")
+    st.caption("Powered by YOLOv8")
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        logger.error(f"Application error: {e}")
-        st.error("Application encountered an error. Please refresh the page.")
+    main()
