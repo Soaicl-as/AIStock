@@ -1,8 +1,8 @@
-streamlit==1.37.0
+streamlit==1.39.0
 ultralytics==8.3.94
-torch==2.4.0
+torch>=2.5.0
 opencv-python-headless==4.11.0.86
 fpdf==1.7.2
-pillow==10.4.0
-numpy==1.26.4
-huggingface_hub==0.24.5  # Added for HF integration
+pillow>=10.4.0
+numpy>=1.26.4
+huggingface_hub>=0.24.5
