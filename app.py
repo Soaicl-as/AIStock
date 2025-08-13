@@ -10,13 +10,6 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Streamlit configuration - MUST be first
-st.set_page_config(
-    page_title="AI Stock Chart Analyzer",
-    page_icon="📈",
-    layout="wide"
-)
-
 # Lazy imports to reduce startup time
 @st.cache_resource
 def load_dependencies():
@@ -160,22 +153,39 @@ def generate_pdf_report(predictions):
 
 # Main application
 def main():
+    # Streamlit configuration
+    st.set_page_config(
+        page_title="AI Stock Chart Analyzer",
+        page_icon="📈",
+        layout="wide"
+    )
+    
     st.title("🤖 AI Stock Chart Analysis Tool")
     st.markdown("Upload a stock chart to detect technical patterns using YOLOv8")
+    st.markdown("---")
     
     # Health check endpoint for Render
     if st.sidebar.button("🔍 Health Check"):
         st.sidebar.success("Application is running!")
         logger.info("Health check requested")
     
-    # Load models
-    with st.spinner("Loading AI models..."):
-        model, pattern_map = load_models()
+    # Load models with UI feedback
+    model_status = st.empty()
+    model_status.info("🔄 Loading AI models... Please wait.")
     
-    if model is None:
-        st.error("⚠️ Could not load the AI model. Please try again later.")
-        st.info("This might be due to memory constraints on the free tier.")
-        return
+    try:
+        model, pattern_map = load_models()
+        
+        if model is None:
+            model_status.error("⚠️ Could not load the AI model. Please try again later.")
+            st.info("This might be due to memory constraints on the free tier.")
+            st.stop()
+        else:
+            model_status.success("✅ AI models loaded successfully!")
+            
+    except Exception as e:
+        model_status.error(f"❌ Error loading models: {e}")
+        st.stop()
     
     # Settings
     st.sidebar.header("Settings")
@@ -185,13 +195,16 @@ def main():
         help="Conservative: Higher confidence, Aggressive: Lower confidence"
     )
     
-    # Main interface
+    # Force UI elements to show
+    st.markdown("### 📊 Upload Your Chart")
+    st.write("Choose a stock chart image to analyze for technical patterns.")
+    
+    # Create two columns for layout
     col1, col2 = st.columns([1, 1])
     
     with col1:
-        st.header("📊 Upload Chart")
         uploaded_file = st.file_uploader(
-            "Choose an image...",
+            "Choose an image file",
             type=["png", "jpg", "jpeg"],
             help="Upload a stock chart screenshot (max 5MB)"
         )
@@ -200,51 +213,55 @@ def main():
             # Check file size
             if uploaded_file.size > 5 * 1024 * 1024:  # 5MB limit
                 st.error("File too large. Please upload an image smaller than 5MB.")
-                return
-            
-            try:
-                image = Image.open(uploaded_file)
-                st.image(image, caption="Uploaded Chart", use_column_width=True)
-                
-                if st.button("🔍 Analyze Chart", type="primary"):
-                    with st.spinner("Analyzing patterns..."):
-                        predictions, annotated_image = analyze_chart(image, model, pattern_map, strategy)
-                    
-                    # Store in session state
-                    st.session_state.predictions = predictions
-                    st.session_state.annotated_image = annotated_image
-                    st.session_state.original_image = image
-                    
-            except Exception as e:
-                st.error(f"Error loading image: {e}")
-    
-    with col2:
-        st.header("📈 Results")
-        
-        if hasattr(st.session_state, 'predictions'):
-            if st.session_state.predictions:
-                st.success(f"✅ Found {len(st.session_state.predictions)} pattern(s)")
-                
-                # Show results
-                for i, pred in enumerate(st.session_state.predictions, 1):
-                    with st.expander(f"Pattern {i}: {pred['pattern']}", expanded=True):
-                        st.metric("Confidence", f"{pred['confidence']:.1%}")
-                        st.write(f"**Location:** {pred['bbox']}")
-                
-                # Show annotated image
-                st.image(st.session_state.annotated_image, caption="Detected Patterns", use_column_width=True)
-                
-                # Text report download
-                if st.button("📄 Generate Report"):
-                    report = generate_pdf_report(st.session_state.predictions)
-                    st.download_button(
-                        label="⬇️ Download Text Report",
-                        data=report,
-                        file_name="chart_analysis_report.txt",
-                        mime="text/plain"
-                    )
             else:
-                st.info("ℹ️ No patterns detected. Try adjusting the strategy or uploading a different chart.")
+                try:
+                    image = Image.open(uploaded_file)
+                    st.image(image, caption="Uploaded Chart", use_column_width=True)
+                    
+                    if st.button("🔍 Analyze Chart", type="primary", use_container_width=True):
+                        with st.spinner("Analyzing patterns..."):
+                            predictions, annotated_image = analyze_chart(image, model, pattern_map, strategy)
+                        
+                        # Store in session state
+                        st.session_state.predictions = predictions
+                        st.session_state.annotated_image = annotated_image
+                        st.session_state.original_image = image
+                        st.rerun()  # Force refresh to show results
+                        
+                except Exception as e:
+                    st.error(f"Error loading image: {e}")
+        else:
+            st.info("👆 Please upload a chart image to get started")
+    with col2:
+        st.markdown("### 📈 Analysis Results")
+        
+        if hasattr(st.session_state, 'predictions') and st.session_state.predictions:
+            st.success(f"✅ Found {len(st.session_state.predictions)} pattern(s)")
+            
+            # Show results
+            for i, pred in enumerate(st.session_state.predictions, 1):
+                with st.expander(f"Pattern {i}: {pred['pattern']}", expanded=True):
+                    st.metric("Confidence", f"{pred['confidence']:.1%}")
+                    st.write(f"**Location:** {pred['bbox']}")
+            
+            # Show annotated image
+            if hasattr(st.session_state, 'annotated_image'):
+                st.image(st.session_state.annotated_image, caption="Detected Patterns", use_column_width=True)
+            
+            # Text report download
+            if st.button("📄 Generate Report", use_container_width=True):
+                report = generate_pdf_report(st.session_state.predictions)
+                st.download_button(
+                    label="⬇️ Download Text Report",
+                    data=report,
+                    file_name="chart_analysis_report.txt",
+                    mime="text/plain",
+                    use_container_width=True
+                )
+        elif hasattr(st.session_state, 'predictions') and len(st.session_state.predictions) == 0:
+            st.info("ℹ️ No patterns detected. Try adjusting the strategy or uploading a different chart.")
+        else:
+            st.info("📤 Upload and analyze a chart to see results here")
     
     # Footer
     st.markdown("---")
